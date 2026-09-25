@@ -288,7 +288,6 @@ def preview_db_dialog():
             float_cols = ['賠率', '投注額', '單位盈虧', '盈虧', '派彩']
             for c in float_cols: df[c] = df[c].astype(float)
             
-            # 使用 format 限定兩位小數顯示
             st.dataframe(df.style.map(style_financials, subset=['單位盈虧', '盈虧', '派彩']).format({col: "{:.2f}" for col in float_cols}), use_container_width=True)
             st.markdown(f"**匯總**：總單數 **{len(df)}** | 總投注額 **${df['投注額'].sum():.2f}** | 總盈虧 **${df['盈虧'].sum():.2f}** | 總單位盈虧 **{df['單位盈虧'].sum():.2f}**")
             csv = df.to_csv(index=False).encode('utf-8-sig')
@@ -411,7 +410,7 @@ def main():
 
                 market = st.selectbox("盤口", ["讓球", "半場讓球", "入球大小", "半場入球大小", "角球大小", "半場角球大小", "讓角", "半場讓角"], key=f"mk_{tipster.id}")
                 
-                # 自動判斷精準預設盤口線
+                # 【重要修正】利用盤口名稱動態賦值預設盤口線
                 if market in ["讓球", "半場讓球", "讓角", "半場讓角"]: default_line = 0.0
                 elif market == "入球大小": default_line = 2.5
                 elif market == "半場入球大小": default_line = 1.5
@@ -419,7 +418,8 @@ def main():
                 elif market == "半場角球大小": default_line = 4.5
                 else: default_line = 0.0
                 
-                line = st.number_input("盤口線", value=default_line, step=0.25, key=f"line_{tipster.id}")
+                # 【重要修正】動態改變 key，強制 Streamlit 切換盤口時載入 default_line
+                line = st.number_input("盤口線", value=default_line, step=0.25, key=f"line_{tipster.id}_{market}")
                 selection = st.radio("您的選擇", ["主", "客", "大", "小"], horizontal=True, key=f"sel_{tipster.id}")
                 
                 c_o1, c_o2, c_o3 = st.columns(3)
