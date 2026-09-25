@@ -33,7 +33,7 @@ class Tip(Base):
     odds = Column(Float, nullable=False)
     stake = Column(Float, default=0.0)    
     
-    # 結算狀態 (新增半場與全場區分)
+    # 結算狀態
     home_score = Column(Integer, nullable=True)         
     away_score = Column(Integer, nullable=True)         
     home_ht_score = Column(Integer, nullable=True)      
@@ -111,7 +111,6 @@ def calculate_actual_margin(odds_1, odds_2):
 def settle_asian_handicap(market_type, line, selection, 
                           h_sc, a_sc, h_ht_sc, a_ht_sc, 
                           h_cor, a_cor, h_ht_cor, a_ht_cor, odds=1.85):
-    # 決定使用的核心數據
     if market_type == "讓球":
         h_val, a_val = h_sc, a_sc
     elif market_type == "半場讓球":
@@ -129,7 +128,6 @@ def settle_asian_handicap(market_type, line, selection,
     elif market_type == "半場角球大小":
         total = h_ht_cor + a_ht_cor
 
-    # 計算差值
     if '大小' in market_type:
         diff = total - line
         is_over = (selection == '大')
@@ -180,13 +178,12 @@ def predict_win_prob_and_kelly(tipster_id, current_odds, current_line, market_ty
     suggested_stake = max(0, user_bankroll * kelly_f)
     
     # 資金風控與上下限邏輯
-    max_stake = user_bankroll * 0.10 # 最高限制 10%
+    max_stake = user_bankroll * 0.10 
     
     if suggested_stake > 0:
         if market_type == "讓球":
             if suggested_stake < 200:
                 suggested_stake = 200 if p_win >= 0.50 else 0
-            # 確保不會因為強制最低額度而打破 10% 限制
             if suggested_stake > max_stake:
                 suggested_stake = max_stake if max_stake >= 200 else 0
         else:
@@ -211,11 +208,11 @@ def get_bankroll_summary(session):
     all_settled_tips = session.query(Tip).filter(Tip.status != 'Open', Tip.is_deleted == False).all()
     data = []
     
-    # 用家 (User) 核算
     u_ledgers = [l for l in all_ledgers if l.account_type == 'User']
     u_dep = sum(l.amount for l in u_ledgers if l.amount < 0)
     u_wit = sum(l.amount for l in u_ledgers if l.amount > 0)
     u_profit = sum(t.profit for t in all_settled_tips) 
+    u_unit_profit = sum(t.unit_profit for t in all_settled_tips)
     u_avail = abs(u_dep) - u_wit + u_profit
     
     data.append({
@@ -223,16 +220,17 @@ def get_bankroll_summary(session):
         '總存入本金': u_dep,
         '總提取本金': u_wit,
         '累計總盈虧': u_profit,
+        '總單位盈虧': u_unit_profit,
         '當前可用資金': u_avail
     })
     
-    # 各分享者 (Tipster) 核算
     tipsters = session.query(Tipster).all()
     for tipster in tipsters:
         t_ledgers = [l for l in all_ledgers if l.account_type == 'Tipster' and l.tipster_id == tipster.id]
         t_dep = sum(l.amount for l in t_ledgers if l.amount < 0)
         t_wit = sum(l.amount for l in t_ledgers if l.amount > 0)
         t_profit = sum(t.profit for t in all_settled_tips if t.tipster_id == tipster.id)
+        t_unit_profit = sum(t.unit_profit for t in all_settled_tips if t.tipster_id == tipster.id)
         t_avail = abs(t_dep) - t_wit + t_profit
         
         data.append({
@@ -240,6 +238,7 @@ def get_bankroll_summary(session):
             '總存入本金': t_dep,
             '總提取本金': t_wit,
             '累計總盈虧': t_profit,
+            '總單位盈虧': t_unit_profit,
             '當前可用資金': t_avail
         })
         
@@ -289,9 +288,34 @@ def preview_db_dialog():
             for c in float_cols: df[c] = df[c].astype(float)
             
             st.dataframe(df.style.map(style_financials, subset=['單位盈虧', '盈虧', '派彩']).format({col: "{:.2f}" for col in float_cols}), use_container_width=True)
-            st.markdown(f"**匯總**：總單數 **{len(df)}** | 總投注額 **${df['投注額'].sum():.2f}** | 總盈虧 **${df['盈虧'].sum():.2f}** | 總單位盈虧 **{df['單位盈虧'].sum():.2f}**")
-            csv = df.to_csv(index=False).encode('utf-8-sig')
-            st.download_button(label=f"📥 匯出 {tipster.name} 報表", data=csv, file_name=f'{tipster.name}_history.csv', mime='text/csv', key=f"dl_{tipster.id}")
+            
+            # --- 新增：批量刪除與一鍵清除 ---
+            st.divider()
+            c_del1, c_del2 = st.columns(2)
+            with c_del1:
+                st.write("🗑️ **批量刪除**")
+                del_ids = st.multiselect("選擇要刪除的注單 ID", df['ID'].tolist(), key=f"ms_{tipster.id}")
+                if st.button("刪除選中項目", key=f"bd_{tipster.id}"):
+                    if del_ids:
+                        tips_to_del = session.query(Tip).filter(Tip.id.in_(del_ids)).all()
+                        old_data_list = [{'id': t.id, 'status': t.status, 'is_deleted': t.is_deleted} for t in tips_to_del]
+                        for t in tips_to_del: t.is_deleted = True
+                        session.add(ActionLog(action_type='BATCH_DELETE', record_id=0, table_name='tips', old_data=json.dumps(old_data_list)))
+                        session.commit()
+                        st.success("批量刪除成功！")
+                        st.rerun()
+            with c_del2:
+                st.write("⚠️ **一鍵清除所有紀錄**")
+                confirm_clear = st.checkbox("確認清除該分享者所有紀錄", key=f"cc_{tipster.id}")
+                if st.button("清除所有紀錄", disabled=not confirm_clear, key=f"ca_{tipster.id}"):
+                    all_t = session.query(Tip).filter(Tip.tipster_id == tipster.id, Tip.is_deleted == False).all()
+                    if all_t:
+                        old_data_list = [{'id': t.id, 'status': t.status, 'is_deleted': t.is_deleted} for t in all_t]
+                        for t in all_t: t.is_deleted = True
+                        session.add(ActionLog(action_type='BATCH_DELETE', record_id=0, table_name='tips', old_data=json.dumps(old_data_list)))
+                        session.commit()
+                        st.success("全部清除成功！")
+                        st.rerun()
 
     with tabs[-1]:
         ledgers = session.query(BankrollLedger).filter_by(account_type='User').order_by(BankrollLedger.id.desc()).all()
@@ -313,29 +337,43 @@ def preview_db_dialog():
     if logs:
         for log in logs:
             col1, col2 = st.columns([4, 1])
-            col1.write(f"時間: {log.created_at.strftime('%m-%d %H:%M')} | 動作: {log.action_type} | 紀錄 ID: {log.record_id}")
+            
+            if log.action_type == 'BATCH_DELETE':
+                records = json.loads(log.old_data)
+                col1.write(f"時間: {log.created_at.strftime('%m-%d %H:%M')} | 動作: 批量/一鍵清除 | 影響筆數: {len(records)}")
+            else:
+                col1.write(f"時間: {log.created_at.strftime('%m-%d %H:%M')} | 動作: {log.action_type} | 紀錄 ID: {log.record_id}")
+                
             if col2.button("復原", key=f"undo_{log.id}"):
-                target_tip = session.query(Tip).get(log.record_id)
-                if target_tip:
-                    old_data = json.loads(log.old_data)
-                    target_tip.status = old_data.get('status', 'Open')
-                    target_tip.is_deleted = old_data.get('is_deleted', False)
-                    target_tip.unit_profit = old_data.get('unit_profit', 0.0)
-                    target_tip.profit = old_data.get('profit', 0.0)
-                    target_tip.payout = old_data.get('payout', 0.0)
-                    
-                    target_tip.home_score = old_data.get('home_score')
-                    target_tip.away_score = old_data.get('away_score')
-                    target_tip.home_ht_score = old_data.get('home_ht_score')
-                    target_tip.away_ht_score = old_data.get('away_ht_score')
-                    target_tip.home_corners = old_data.get('home_corners')
-                    target_tip.away_corners = old_data.get('away_corners')
-                    target_tip.home_ht_corners = old_data.get('home_ht_corners')
-                    target_tip.away_ht_corners = old_data.get('away_ht_corners')
+                if log.action_type == 'BATCH_DELETE':
+                    records = json.loads(log.old_data)
+                    for item in records:
+                        t = session.query(Tip).get(item['id'])
+                        if t:
+                            t.is_deleted = item.get('is_deleted', False)
+                            t.status = item.get('status', 'Open')
+                else:
+                    target_tip = session.query(Tip).get(log.record_id)
+                    if target_tip:
+                        old_data = json.loads(log.old_data)
+                        target_tip.status = old_data.get('status', 'Open')
+                        target_tip.is_deleted = old_data.get('is_deleted', False)
+                        target_tip.unit_profit = old_data.get('unit_profit', 0.0)
+                        target_tip.profit = old_data.get('profit', 0.0)
+                        target_tip.payout = old_data.get('payout', 0.0)
                         
-                    session.delete(log)
-                    session.commit()
-                    st.rerun()
+                        target_tip.home_score = old_data.get('home_score')
+                        target_tip.away_score = old_data.get('away_score')
+                        target_tip.home_ht_score = old_data.get('home_ht_score')
+                        target_tip.away_ht_score = old_data.get('away_ht_score')
+                        target_tip.home_corners = old_data.get('home_corners')
+                        target_tip.away_corners = old_data.get('away_corners')
+                        target_tip.home_ht_corners = old_data.get('home_ht_corners')
+                        target_tip.away_ht_corners = old_data.get('away_ht_corners')
+                            
+                session.delete(log)
+                session.commit()
+                st.rerun()
     else:
         st.write("近期無可復原的操作。")
     session.close()
@@ -379,7 +417,7 @@ def main():
     # ----------------------------------------
     with tabs[-1]:
         st.subheader("系統管理員工具")
-        st.button("🗄️ 開啟數據庫管理 (預覽 / 撤銷 / 匯出)", on_click=preview_db_dialog)
+        st.button("🗄️ 開啟數據庫管理 (預覽 / 批量清除 / 撤銷 / 匯出)", on_click=preview_db_dialog)
 
     # ----------------------------------------
     # [Tab] 動態 Tipster Tabs
@@ -410,7 +448,6 @@ def main():
 
                 market = st.selectbox("盤口", ["讓球", "半場讓球", "入球大小", "半場入球大小", "角球大小", "半場角球大小", "讓角", "半場讓角"], key=f"mk_{tipster.id}")
                 
-                # 【重要修正】利用盤口名稱動態賦值預設盤口線
                 if market in ["讓球", "半場讓球", "讓角", "半場讓角"]: default_line = 0.0
                 elif market == "入球大小": default_line = 2.5
                 elif market == "半場入球大小": default_line = 1.5
@@ -418,7 +455,6 @@ def main():
                 elif market == "半場角球大小": default_line = 4.5
                 else: default_line = 0.0
                 
-                # 【重要修正】動態改變 key，強制 Streamlit 切換盤口時載入 default_line
                 line = st.number_input("盤口線", value=default_line, step=0.25, key=f"line_{tipster.id}_{market}")
                 selection = st.radio("您的選擇", ["主", "客", "大", "小"], horizontal=True, key=f"sel_{tipster.id}")
                 
@@ -447,7 +483,7 @@ def main():
             with colL:
                 stake = st.number_input("實際下注額 (預設為AI建議)", value=float(rec_stake), step=10.0, key=f"stake_{tipster.id}")
                 
-                if st.button("提交建議與注單", key=f"submit_{tipster.id}", type="primary"):
+                if st.button("✅ 提交建議與注單", key=f"submit_{tipster.id}", type="primary"):
                     if not tour or not h_team or not a_team:
                         st.error("賽事、主隊、客隊名稱不能為空")
                     else:
@@ -461,13 +497,52 @@ def main():
                         st.success("紀錄成功！")
                         st.rerun()
 
+                # --- 新增：撤回並重填上一筆注單 ---
+                latest_tip = db_session.query(Tip).filter_by(tipster_id=tipster.id).order_by(Tip.id.desc()).first()
+                if latest_tip:
+                    if st.button("🔙 發現錯漏？撤回並重填最新一筆注單", key=f"edit_latest_{tipster.id}"):
+                        # 將最新注單的資料倒回 Session State，讓表單自動填上
+                        st.session_state[f"cat_{tipster.id}"] = latest_tip.category
+                        
+                        if latest_tip.tournament in history_tours:
+                            st.session_state[f"tour_{tipster.id}"] = latest_tip.tournament
+                            st.session_state[f"tour_new_{tipster.id}"] = ""
+                        else:
+                            st.session_state[f"tour_{tipster.id}"] = ""
+                            st.session_state[f"tour_new_{tipster.id}"] = latest_tip.tournament
+                            
+                        if latest_tip.home_team in history_teams:
+                            st.session_state[f"ht_{tipster.id}"] = latest_tip.home_team
+                            st.session_state[f"ht_new_{tipster.id}"] = ""
+                        else:
+                            st.session_state[f"ht_{tipster.id}"] = ""
+                            st.session_state[f"ht_new_{tipster.id}"] = latest_tip.home_team
+                            
+                        if latest_tip.away_team in history_teams:
+                            st.session_state[f"at_{tipster.id}"] = latest_tip.away_team
+                            st.session_state[f"at_new_{tipster.id}"] = ""
+                        else:
+                            st.session_state[f"at_{tipster.id}"] = ""
+                            st.session_state[f"at_new_{tipster.id}"] = latest_tip.away_team
+                            
+                        st.session_state[f"mk_{tipster.id}"] = latest_tip.market_type
+                        st.session_state[f"line_{tipster.id}_{latest_tip.market_type}"] = latest_tip.line
+                        st.session_state[f"sel_{tipster.id}"] = latest_tip.selection
+                        st.session_state["odds1"] = latest_tip.odds
+                        st.session_state["odds2"] = calculate_linked_odds(latest_tip.odds)
+                        st.session_state[f"stake_{tipster.id}"] = latest_tip.stake
+                        
+                        # 刪除該筆注單，讓使用者重新提交
+                        db_session.delete(latest_tip)
+                        db_session.commit()
+                        st.rerun()
+
     # ----------------------------------------
     # [Tab] 資金總覽與結算 (t_settle)
     # ----------------------------------------
     with tabs[-2]:
         st.header("資金總覽與賽果結算")
         
-        # --- 存取資金操作 ---
         with st.expander("📝 存取資金操作 (注入/提取本金)"):
             c_f1, c_f2 = st.columns(2)
             with c_f1:
@@ -489,16 +564,14 @@ def main():
                     st.success("資金流水已成功紀錄！")
                     st.rerun()
 
-        # --- 表列資金總覽 ---
         st.subheader("📊 資金總覽 (表列方式)")
         df_summary, _ = get_bankroll_summary(db_session)
-        df_summary_cols = ['總存入本金', '總提取本金', '累計總盈虧', '當前可用資金']
+        df_summary_cols = ['總存入本金', '總提取本金', '累計總盈虧', '總單位盈虧', '當前可用資金']
         for c in df_summary_cols: df_summary[c] = df_summary[c].astype(float)
         
         st.dataframe(df_summary.style.map(style_financials, subset=df_summary_cols).format({c: "{:.2f}" for c in df_summary_cols}), use_container_width=True)
         st.divider()
 
-        # --- 賽果結算區 (8大維度) ---
         st.subheader("🏁 待結算注單")
         open_tips = db_session.query(Tip).filter_by(status='Open', is_deleted=False).all()
         
@@ -508,7 +581,6 @@ def main():
         for t in open_tips:
             with st.expander(f"ID:{t.id} | {t.tournament} | {t.home_team} vs {t.away_team} | {t.market_type} ({t.line}) | 投注額: ${t.stake:.2f}"):
                 
-                # 8大輸入欄
                 c1, c2, c3, c4 = st.columns(4)
                 h_ht_sc = c1.number_input("主隊半場進球", min_value=0, step=1, key=f"h_ht_sc_{t.id}")
                 a_ht_sc = c2.number_input("客隊半場進球", min_value=0, step=1, key=f"a_ht_sc_{t.id}")
@@ -521,7 +593,6 @@ def main():
                 h_cor = c7.number_input("主隊全場角球", min_value=0, step=1, key=f"h_cor_{t.id}")
                 a_cor = c8.number_input("客隊全場角球", min_value=0, step=1, key=f"a_cor_{t.id}")
                 
-                # 系統動態計算與顯示
                 st.info(f"📊 **系統計算**：兩隊半場總進球 {h_ht_sc + a_ht_sc} | 全場總進球 {h_sc + a_sc} | 半場總角球 {h_ht_cor + a_ht_cor} | 全場總角球 {h_cor + a_cor}")
                 
                 if st.button("執行結算", key=f"set_{t.id}", type="primary"):
@@ -534,7 +605,6 @@ def main():
                     profit = round(t.stake * unit_profit, 2)
                     payout = round(t.stake + profit if unit_profit >= -0.5 else 0.0, 2)
                     
-                    # 紀錄 Undo 狀態
                     old_data = {
                         'status': t.status, 'is_deleted': t.is_deleted, 
                         'unit_profit': t.unit_profit, 'profit': t.profit, 'payout': t.payout,
@@ -548,7 +618,6 @@ def main():
                         table_name='tips', old_data=json.dumps(old_data)
                     ))
 
-                    # 更新寫入結果
                     t.home_score, t.away_score = h_sc, a_sc
                     t.home_ht_score, t.away_ht_score = h_ht_sc, a_ht_sc
                     t.home_corners, t.away_corners = h_cor, a_cor
