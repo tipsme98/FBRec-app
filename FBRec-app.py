@@ -68,7 +68,6 @@ class ActionLog(Base):
     created_at = Column(DateTime, default=datetime.now)
 
 # 初始化資料庫
-engine = create_engine('sqlite:///betting_system.db', echo=False, connect_args={"check_same_thread": False})
 Base.metadata.create_all(engine)
 SessionLocal = sessionmaker(bind=engine)
 
