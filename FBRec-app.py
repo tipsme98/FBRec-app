@@ -289,7 +289,6 @@ def preview_db_dialog():
             
             st.dataframe(df.style.map(style_financials, subset=['單位盈虧', '盈虧', '派彩']).format({col: "{:.2f}" for col in float_cols}), use_container_width=True)
             
-            # --- 新增：批量刪除與一鍵清除 ---
             st.divider()
             c_del1, c_del2 = st.columns(2)
             with c_del1:
@@ -425,6 +424,43 @@ def main():
     for i, tipster in enumerate(tipsters):
         with tabs[i]:
             st.header(f"分享者：{tipster.name} 的盤口建議")
+            
+            # --- 處理「撤回並重填」預設值注入 (必須在渲染任何 widget 之前) ---
+            preset = st.session_state.pop(f"edit_preset_{tipster.id}", None)
+            if preset:
+                st.session_state[f"cat_{tipster.id}"] = preset['category']
+                
+                all_tips_preset = db_session.query(Tip).all()
+                history_tours_preset = list(set([t.tournament for t in all_tips_preset if t.tournament]))
+                if preset['tournament'] in history_tours_preset:
+                    st.session_state[f"tour_{tipster.id}"] = preset['tournament']
+                    st.session_state[f"tour_new_{tipster.id}"] = ""
+                else:
+                    st.session_state[f"tour_{tipster.id}"] = ""
+                    st.session_state[f"tour_new_{tipster.id}"] = preset['tournament']
+                    
+                history_teams_preset = list(set([t.home_team for t in all_tips_preset] + [t.away_team for t in all_tips_preset]))
+                if preset['home_team'] in history_teams_preset:
+                    st.session_state[f"ht_{tipster.id}"] = preset['home_team']
+                    st.session_state[f"ht_new_{tipster.id}"] = ""
+                else:
+                    st.session_state[f"ht_{tipster.id}"] = ""
+                    st.session_state[f"ht_new_{tipster.id}"] = preset['home_team']
+                    
+                if preset['away_team'] in history_teams_preset:
+                    st.session_state[f"at_{tipster.id}"] = preset['away_team']
+                    st.session_state[f"at_new_{tipster.id}"] = ""
+                else:
+                    st.session_state[f"at_{tipster.id}"] = ""
+                    st.session_state[f"at_new_{tipster.id}"] = preset['away_team']
+                    
+                st.session_state[f"mk_{tipster.id}"] = preset['market_type']
+                st.session_state[f"line_{tipster.id}_{preset['market_type']}"] = preset['line']
+                st.session_state[f"sel_{tipster.id}"] = preset['selection']
+                st.session_state["odds1"] = preset['odds']
+                st.session_state["odds2"] = calculate_linked_odds(preset['odds'])
+                st.session_state[f"stake_{tipster.id}"] = preset['stake']
+
             colL, colR = st.columns([2, 1])
             
             with colL:
@@ -497,42 +533,21 @@ def main():
                         st.success("紀錄成功！")
                         st.rerun()
 
-                # --- 新增：撤回並重填上一筆注單 ---
-                latest_tip = db_session.query(Tip).filter_by(tipster_id=tipster.id).order_by(Tip.id.desc()).first()
+                # --- 撤回並重填最新一筆注單 ---
+                latest_tip = db_session.query(Tip).filter_by(tipster_id=tipster.id, is_deleted=False).order_by(Tip.id.desc()).first()
                 if latest_tip:
                     if st.button("🔙 發現錯漏？撤回並重填最新一筆注單", key=f"edit_latest_{tipster.id}"):
-                        # 將最新注單的資料倒回 Session State，讓表單自動填上
-                        st.session_state[f"cat_{tipster.id}"] = latest_tip.category
-                        
-                        if latest_tip.tournament in history_tours:
-                            st.session_state[f"tour_{tipster.id}"] = latest_tip.tournament
-                            st.session_state[f"tour_new_{tipster.id}"] = ""
-                        else:
-                            st.session_state[f"tour_{tipster.id}"] = ""
-                            st.session_state[f"tour_new_{tipster.id}"] = latest_tip.tournament
-                            
-                        if latest_tip.home_team in history_teams:
-                            st.session_state[f"ht_{tipster.id}"] = latest_tip.home_team
-                            st.session_state[f"ht_new_{tipster.id}"] = ""
-                        else:
-                            st.session_state[f"ht_{tipster.id}"] = ""
-                            st.session_state[f"ht_new_{tipster.id}"] = latest_tip.home_team
-                            
-                        if latest_tip.away_team in history_teams:
-                            st.session_state[f"at_{tipster.id}"] = latest_tip.away_team
-                            st.session_state[f"at_new_{tipster.id}"] = ""
-                        else:
-                            st.session_state[f"at_{tipster.id}"] = ""
-                            st.session_state[f"at_new_{tipster.id}"] = latest_tip.away_team
-                            
-                        st.session_state[f"mk_{tipster.id}"] = latest_tip.market_type
-                        st.session_state[f"line_{tipster.id}_{latest_tip.market_type}"] = latest_tip.line
-                        st.session_state[f"sel_{tipster.id}"] = latest_tip.selection
-                        st.session_state["odds1"] = latest_tip.odds
-                        st.session_state["odds2"] = calculate_linked_odds(latest_tip.odds)
-                        st.session_state[f"stake_{tipster.id}"] = latest_tip.stake
-                        
-                        # 刪除該筆注單，讓使用者重新提交
+                        st.session_state[f"edit_preset_{tipster.id}"] = {
+                            'category': latest_tip.category,
+                            'tournament': latest_tip.tournament,
+                            'home_team': latest_tip.home_team,
+                            'away_team': latest_tip.away_team,
+                            'market_type': latest_tip.market_type,
+                            'line': latest_tip.line,
+                            'selection': latest_tip.selection,
+                            'odds': latest_tip.odds,
+                            'stake': latest_tip.stake
+                        }
                         db_session.delete(latest_tip)
                         db_session.commit()
                         st.rerun()
