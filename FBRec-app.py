@@ -34,14 +34,14 @@ class Tip(Base):
     stake = Column(Float, default=0.0)    
     
     # 結算狀態 (新增半場與全場區分)
-    home_score = Column(Integer, nullable=True)         # 全場主隊進球
-    away_score = Column(Integer, nullable=True)         # 全場客隊進球
-    home_ht_score = Column(Integer, nullable=True)      # 半場主隊進球
-    away_ht_score = Column(Integer, nullable=True)      # 半場客隊進球
-    home_corners = Column(Integer, nullable=True)       # 全場主隊角球
-    away_corners = Column(Integer, nullable=True)       # 全場客隊角球
-    home_ht_corners = Column(Integer, nullable=True)    # 半場主隊角球
-    away_ht_corners = Column(Integer, nullable=True)    # 半場客隊角球
+    home_score = Column(Integer, nullable=True)         
+    away_score = Column(Integer, nullable=True)         
+    home_ht_score = Column(Integer, nullable=True)      
+    away_ht_score = Column(Integer, nullable=True)      
+    home_corners = Column(Integer, nullable=True)       
+    away_corners = Column(Integer, nullable=True)       
+    home_ht_corners = Column(Integer, nullable=True)    
+    away_ht_corners = Column(Integer, nullable=True)    
     
     status = Column(String(20), default='Open') 
     unit_profit = Column(Float, default=0.0) 
@@ -55,9 +55,9 @@ class Tip(Base):
 class BankrollLedger(Base):
     __tablename__ = 'bankroll_ledger'
     id = Column(Integer, primary_key=True)
-    account_type = Column(String(20)) # 'User' or 'Tipster'
+    account_type = Column(String(20)) 
     tipster_id = Column(Integer, ForeignKey('tipsters.id'), nullable=True)
-    amount = Column(Float, nullable=False) # 存入為負數(紅), 提取為正數(綠)
+    amount = Column(Float, nullable=False) 
     description = Column(String(200))
     created_at = Column(DateTime, default=datetime.now)
 
@@ -66,6 +66,7 @@ class ActionLog(Base):
     id = Column(Integer, primary_key=True)
     action_type = Column(String(50)) 
     record_id = Column(Integer)
+    ledger_id = Column(Integer, nullable=True) 
     table_name = Column(String(50))
     old_data = Column(Text) 
     created_at = Column(DateTime, default=datetime.now)
@@ -74,7 +75,7 @@ class ActionLog(Base):
 engine = create_engine('sqlite:///betting_system.db', echo=False, connect_args={"check_same_thread": False})
 Base.metadata.create_all(engine)
 
-# 自動升級舊有資料庫 (Auto-Migration) 解決 OperationalError
+# 自動升級舊有資料庫 (Auto-Migration)
 def upgrade_database(engine):
     inspector = inspect(engine)
     with engine.begin() as conn:
@@ -83,8 +84,6 @@ def upgrade_database(engine):
             if 'stake' not in columns: conn.execute(text("ALTER TABLE tips ADD COLUMN stake FLOAT DEFAULT 0.0"))
             if 'profit' not in columns: conn.execute(text("ALTER TABLE tips ADD COLUMN profit FLOAT DEFAULT 0.0"))
             if 'payout' not in columns: conn.execute(text("ALTER TABLE tips ADD COLUMN payout FLOAT DEFAULT 0.0"))
-            
-            # 確保有半場與角球的 8 大維度
             if 'home_corners' not in columns: conn.execute(text("ALTER TABLE tips ADD COLUMN home_corners INTEGER"))
             if 'away_corners' not in columns: conn.execute(text("ALTER TABLE tips ADD COLUMN away_corners INTEGER"))
             if 'home_ht_score' not in columns: conn.execute(text("ALTER TABLE tips ADD COLUMN home_ht_score INTEGER"))
@@ -99,7 +98,6 @@ SessionLocal = sessionmaker(bind=engine)
 # 2. 核心算法與結算引擎
 # ==========================================
 def calculate_linked_odds(input_odds, margin=1.085):
-    """根據輸入主/大賠率和抽水，自動反推客/小賠率"""
     if input_odds <= 1.0: return 0.0
     prob_1 = 1 / input_odds
     prob_2 = margin - prob_1
@@ -107,15 +105,12 @@ def calculate_linked_odds(input_odds, margin=1.085):
     return round(1 / prob_2, 3)
 
 def calculate_actual_margin(odds_1, odds_2):
-    """計算當前實際抽水值"""
     if odds_1 <= 1 or odds_2 <= 1: return 0.0
     return (1/odds_1) + (1/odds_2)
 
 def settle_asian_handicap(market_type, line, selection, 
                           h_sc, a_sc, h_ht_sc, a_ht_sc, 
                           h_cor, a_cor, h_ht_cor, a_ht_cor, odds=1.85):
-    """亞洲盤口精算引擎，根據不同盤口抓取對應的數值"""
-    
     # 決定使用的核心數據
     if market_type == "讓球":
         h_val, a_val = h_sc, a_sc
@@ -165,7 +160,7 @@ def get_tipster_features(tipster_id, session):
     df = pd.DataFrame(data)
     return df[['odds', 'line']], df['target']
 
-def predict_win_prob_and_kelly(tipster_id, current_odds, current_line, user_bankroll, session, kelly_fraction=0.25):
+def predict_win_prob_and_kelly(tipster_id, current_odds, current_line, market_type, user_bankroll, session, kelly_fraction=0.25):
     X, y = get_tipster_features(tipster_id, session)
     
     if X is None or len(X) < 10:
@@ -184,6 +179,22 @@ def predict_win_prob_and_kelly(tipster_id, current_odds, current_line, user_bank
     kelly_f = max(0, (b * p_win - q) / b) * kelly_fraction
     suggested_stake = max(0, user_bankroll * kelly_f)
     
+    # 資金風控與上下限邏輯
+    max_stake = user_bankroll * 0.10 # 最高限制 10%
+    
+    if suggested_stake > 0:
+        if market_type == "讓球":
+            if suggested_stake < 200:
+                suggested_stake = 200 if p_win >= 0.50 else 0
+            # 確保不會因為強制最低額度而打破 10% 限制
+            if suggested_stake > max_stake:
+                suggested_stake = max_stake if max_stake >= 200 else 0
+        else:
+            if suggested_stake < 10:
+                suggested_stake = 10 if p_win >= 0.50 else 0
+            if suggested_stake > max_stake:
+                suggested_stake = max_stake if max_stake >= 10 else 0
+
     return round(suggested_stake, 2), round(p_win, 4), ai_status
 
 # ==========================================
@@ -196,17 +207,15 @@ def style_financials(val):
     return ''
 
 def get_bankroll_summary(session):
-    """計算並返回用家與各分享者的資金狀態 DataFrame"""
     all_ledgers = session.query(BankrollLedger).all()
     all_settled_tips = session.query(Tip).filter(Tip.status != 'Open', Tip.is_deleted == False).all()
-    
     data = []
     
     # 用家 (User) 核算
     u_ledgers = [l for l in all_ledgers if l.account_type == 'User']
     u_dep = sum(l.amount for l in u_ledgers if l.amount < 0)
     u_wit = sum(l.amount for l in u_ledgers if l.amount > 0)
-    u_profit = sum(t.profit for t in all_settled_tips) # 用家享受所有分享者的總獲利
+    u_profit = sum(t.profit for t in all_settled_tips) 
     u_avail = abs(u_dep) - u_wit + u_profit
     
     data.append({
@@ -249,7 +258,6 @@ def preview_db_dialog():
         session.close()
         return
 
-    # 改為只有分享者 Tab 與用家資金流水
     tabs = st.tabs([t.name for t in tipsters] + ["💰 用家資金流水"])
     
     for i, tipster in enumerate(tipsters):
@@ -277,7 +285,11 @@ def preview_db_dialog():
                 })
             
             df = pd.DataFrame(data)
-            st.dataframe(df.style.map(style_financials, subset=['單位盈虧', '盈虧', '派彩']), use_container_width=True)
+            float_cols = ['賠率', '投注額', '單位盈虧', '盈虧', '派彩']
+            for c in float_cols: df[c] = df[c].astype(float)
+            
+            # 使用 format 限定兩位小數顯示
+            st.dataframe(df.style.map(style_financials, subset=['單位盈虧', '盈虧', '派彩']).format({col: "{:.2f}" for col in float_cols}), use_container_width=True)
             st.markdown(f"**匯總**：總單數 **{len(df)}** | 總投注額 **${df['投注額'].sum():.2f}** | 總盈虧 **${df['盈虧'].sum():.2f}** | 總單位盈虧 **{df['單位盈虧'].sum():.2f}**")
             csv = df.to_csv(index=False).encode('utf-8-sig')
             st.download_button(label=f"📥 匯出 {tipster.name} 報表", data=csv, file_name=f'{tipster.name}_history.csv', mime='text/csv', key=f"dl_{tipster.id}")
@@ -291,7 +303,8 @@ def preview_db_dialog():
                 '金額': l.amount,
                 '備註': l.description
             } for l in ledgers])
-            st.dataframe(ldf.style.map(style_financials, subset=['金額']), use_container_width=True)
+            ldf['金額'] = ldf['金額'].astype(float)
+            st.dataframe(ldf.style.map(style_financials, subset=['金額']).format({'金額': "{:.2f}"}), use_container_width=True)
         else:
             st.info("用家尚無存取資金流水")
 
@@ -424,15 +437,15 @@ def main():
                 _, user_avail_bankroll = get_bankroll_summary(db_session)
                 
                 rec_stake, win_prob, ai_status = predict_win_prob_and_kelly(
-                    tipster.id, st.session_state.odds1, line, user_avail_bankroll, db_session
+                    tipster.id, st.session_state.odds1, line, market, user_avail_bankroll, db_session
                 )
                 
                 st.caption(f"模型狀態: {ai_status}")
                 st.metric("預測勝率 (RF Model)", f"{win_prob * 100:.1f}%")
-                st.metric("建議下注額 (Kelly)", f"${rec_stake}")
+                st.metric("建議下注額 (Kelly, 最高不超過本金 10%)", f"${rec_stake:.2f}")
                 
             with colL:
-                stake = st.number_input("實際下注額 (預設為AI建議)", value=float(rec_stake), step=100.0, key=f"stake_{tipster.id}")
+                stake = st.number_input("實際下注額 (預設為AI建議)", value=float(rec_stake), step=10.0, key=f"stake_{tipster.id}")
                 
                 if st.button("提交建議與注單", key=f"submit_{tipster.id}", type="primary"):
                     if not tour or not h_team or not a_team:
@@ -467,7 +480,7 @@ def main():
             
             if st.button("提交資金變動"):
                 if amt_input > 0:
-                    actual_amt = -amt_input if "存入" in action else amt_input
+                    actual_amt = round(-amt_input if "存入" in action else amt_input, 2)
                     db_acc = 'Tipster' if acc_type == "分享者虛擬本金" else 'User'
                     t_id = tipster_dict.get(target_tipster) if target_tipster else None
                     
@@ -479,7 +492,10 @@ def main():
         # --- 表列資金總覽 ---
         st.subheader("📊 資金總覽 (表列方式)")
         df_summary, _ = get_bankroll_summary(db_session)
-        st.dataframe(df_summary.style.map(style_financials, subset=['總存入本金', '總提取本金', '累計總盈虧', '當前可用資金']), use_container_width=True)
+        df_summary_cols = ['總存入本金', '總提取本金', '累計總盈虧', '當前可用資金']
+        for c in df_summary_cols: df_summary[c] = df_summary[c].astype(float)
+        
+        st.dataframe(df_summary.style.map(style_financials, subset=df_summary_cols).format({c: "{:.2f}" for c in df_summary_cols}), use_container_width=True)
         st.divider()
 
         # --- 賽果結算區 (8大維度) ---
@@ -490,7 +506,7 @@ def main():
             st.info("目前無待結算注單。")
             
         for t in open_tips:
-            with st.expander(f"ID:{t.id} | {t.tournament} | {t.home_team} vs {t.away_team} | {t.market_type} ({t.line}) | 投注額: ${t.stake}"):
+            with st.expander(f"ID:{t.id} | {t.tournament} | {t.home_team} vs {t.away_team} | {t.market_type} ({t.line}) | 投注額: ${t.stake:.2f}"):
                 
                 # 8大輸入欄
                 c1, c2, c3, c4 = st.columns(4)
@@ -515,8 +531,8 @@ def main():
                         h_cor, a_cor, h_ht_cor, a_ht_cor, t.odds
                     )
                     
-                    profit = t.stake * unit_profit
-                    payout = t.stake + profit if unit_profit >= -0.5 else 0.0 
+                    profit = round(t.stake * unit_profit, 2)
+                    payout = round(t.stake + profit if unit_profit >= -0.5 else 0.0, 2)
                     
                     # 紀錄 Undo 狀態
                     old_data = {
@@ -544,7 +560,7 @@ def main():
                     t.payout = payout
                     
                     db_session.commit()
-                    st.success(f"結算完成：{status} | 單位盈虧：{unit_profit} | 實際盈虧：${profit}")
+                    st.success(f"結算完成：{status} | 單位盈虧：{unit_profit:.2f} | 實際盈虧：${profit:.2f}")
                     st.rerun()
 
     db_session.close()
